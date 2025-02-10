@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bluetooth Monitor</title>
+</head>
+<body>
+    <button id="connectButton">Connect</button>
+
+    <button class="switch" data-v="A10404">RAW Data on</button>
+    <button class="switch" data-v="A102">RAW Data off</button>
+    <div id="capabilitiesDisplay"></div>
+    <div id="dataDisplay"></div>
+    <div id="statusDisplay"></div>
+
+    <script>
+
+        var writeTarget=null;
+
+        function getAllInt8Values(dataView) {
+            const values = [];
+            for (let i = 0; i < dataView.byteLength; i++) {
+                values.push(dataView.getInt8(i));
+            }
+            return values;
+        }
+
+        function htb(h) {
+            for (var bytes = [], c = 0; c < h.length; c += 2)
+                bytes.push(parseInt(h.substr(c, 2), 16));
+            return new Uint8Array(bytes);
+        }
+
+        document.getElementById('connectButton').addEventListener('click', async () => {
+            try {
+                const device = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: ['de5bf728-d711-4e47-af26-65e3012a5dc7', '6e40fff0-b5a3-f393-e0a9-e50e24dcca9e'] // Add the relevant service UUIDs here
+                });
+
+                const server = await device.gatt.connect();
+                const services = await server.getPrimaryServices();
+
+                // Display the services and characteristics
+                const capabilitiesDisplay = document.getElementById('capabilitiesDisplay');
+                capabilitiesDisplay.innerHTML = '<h2>Device Capabilities</h2>';
+
+                for (const service of services) {
+                    capabilitiesDisplay.innerHTML += `<h3>Service: ${service.uuid}</h3>`;
+
+                    const characteristics = await service.getCharacteristics();
+                    for (const characteristic of characteristics) {
+                        capabilitiesDisplay.innerHTML += `<p>Characteristic: ${characteristic.uuid}</p>`;
+
+                        // Check if the characteristic supports notifications or indications
+                        const properties = characteristic.properties;
+                        if(properties.write&&writeTarget==null) {
+                            writeTarget=characteristic;
+                            console.log('Connected to writable characteristic');
+                        }
+                        if (properties.notify || properties.indicate) {
+                            // Set up event listener for incoming data for each characteristic
+                            characteristic.addEventListener('characteristicvaluechanged', (event) => {
+                                const view=new DataView(event.target.value.buffer);
+                                const value=(getAllInt8Values(view));
+                                const dataDisplay = document.getElementById('dataDisplay');
+                                dataDisplay.innerHTML += `<p>Received Data from ${characteristic.uuid}: `+value.join(",")+`</p>`;
+                            });
+
+                            // Start notifications to receive incoming data
+                            try {
+                                await characteristic.startNotifications();  
+                            } catch (error) {
+                                console.warn(`Failed to start notifications for ${characteristic.uuid}: ${error.message}`);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Error:', error);
+            }
+        });
+    
+
+        document.querySelectorAll('button.switch').forEach((element) => {
+            element.addEventListener('click', async () => {
+                if (writeTarget) {
+                    
+                    const data = htb(element.dataset.v);
+                    
+                    var arrayOut = new Uint8Array(16);
+                    for (let i = 0; i < data.length; i++) {
+                        arrayOut[i] = data[i] & 0xff;
+                        arrayOut[15] = (arrayOut[15] + arrayOut[i]) & 0xff;
+                    }
+                    console.log(arrayOut);
+
+                    try {
+                        await writeTarget.writeValue(arrayOut);
+                        document.getElementById('statusDisplay').innerText = 'Data sent successfully';
+                    } catch (error) {
+                        console.error('Error sending data:', error);
+                        document.getElementById('statusDisplay').innerText = 'Error sending data';
+                    }
+                } else {
+                    document.getElementById('statusDisplay').innerText = 'No writable characteristic found';
+                }
+            });
+        });
+    </script>
+</body>
+</html>
