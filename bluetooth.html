@@ -162,7 +162,9 @@
     </article>
 
     <script>
-
+        /**
+         * get MIDI access
+         */
         navigator.permissions.query({ name: "midi", sysex: true }).then((result) => {
             if (result.state === "granted") {
                 // Access granted.
@@ -172,12 +174,21 @@
                 // Permission was denied by user prompt or permission policy
         });
 
-        let midi = null;        // global MIDIAccess object
-        let midi_output=null;   // output device
-        var channel=0;          // active channel
+        /**
+         * global variables
+         */
+        let midi = null;                            // global MIDIAccess object
+        let midi_output=null;                       // output device
+        var channel=0;                              // active channel
+        var interpolation_current={x:0,y:0,z:0};    // current value we're sending on CC
+        var interpolation_target={x:0,y:0,z:0};     // target value we're trying to reach
+        var writeTarget=null;                       // we need to send some commands to the bluetooth ring, this var will hold the service id
+        var interpolation_loop=null;                // a loop / interval which will interpolate midi values
+        var ax,ay,az;
 
-        var writeTarget=null;
-
+        /**
+         * reads all the Uint8 numbers from the Data View we read from the Ring
+         */
         function getAllUint8Values(dataView) {
             const values = [];
             for (let i = 0; i < dataView.byteLength; i++) {
@@ -186,27 +197,41 @@
             return values;
         }
 
+        /**
+         * convert hexadecimal number string to an array of bytes
+         */
         function htb(h) {
             for (var bytes = [], c = 0; c < h.length; c += 2)
                 bytes.push(parseInt(h.substr(c, 2), 16));
             return new Uint8Array(bytes);
         }
 
+        /**
+         * 12 bit long integer number representation
+         */
         function int12(uint12) {
             return uint12 > 2047 ? uint12 - 4096 : uint12;
         }
 
-        // Function to convert raw ADC value to G value for a ±4G accelerometer
+        /**
+         * Function to convert raw ADC value to G value for a ±4G accelerometer
+         */
         function convertRawToG(rawValue) {
             const rangeG = 4; // ±4G
             return (rawValue / 2048) * rangeG;
         }
 
+        /**
+         * Scold the User when not giving MIDI access
+         */
         function onMIDIFailure(msg) {
             alert("Y U do dis :-(");
             console.error(`Failed to get MIDI access - ${msg}`);
         }
 
+        /**
+         * Set up our MIDI connections
+         */
         function onMIDISuccess(midiAccess) {
             midi = midiAccess; // store in the global (in real usage, would probably keep in an object instance)
             for (const entry of midiAccess.outputs) {
@@ -229,6 +254,9 @@
             }
         }
 
+        /**
+         * create a list of connected MIDI receivers
+         */
         function listOutputs(midiAccess) {
             for (const entry of midiAccess.outputs) {
                 const output = entry[1];
@@ -237,6 +265,9 @@
             }
         }
 
+        /**
+         * Send the CC command the user selected for X,Y,Z rotation values
+         */
         function sendCC(cc, val) {
             /** the channel we send on is B0 + the channel selected by the user */
             var sendchannel=parseInt("B0",16);
@@ -248,21 +279,82 @@
             catch(error) {
                 document.getElementById("midi_output_device").style.border="1px solid red";
             }
-         }
+        }
 
+        /**
+         * User clicks "connect" Button and selects Ring, then ...
+         */
         document.getElementById('connectButton').addEventListener('click', async () => {
             try {
+
+                /**
+                 * Don't waste too much time on the DOM stuff
+                 */
+                ax=document.getElementById("assign_x");
+                ay=document.getElementById("assign_y");
+                az=document.getElementById("assign_z");
+
+                /**
+                 * This will run 20 times a sec
+                 */
+                interpolation_loop=setInterval(function() {
+                    /**
+                     * I'm lazy
+                     */
+                    if(interpolation_current.x<interpolation_target.x) {
+                        interpolation_current.x++;
+                    }
+                    if(interpolation_current.x>interpolation_target.x) {
+                        interpolation_current.x--;
+                    }
+                    if(interpolation_current.y<interpolation_target.y) {
+                        interpolation_current.y++;
+                    }
+                    if(interpolation_current.y>interpolation_target.y) {
+                        interpolation_current.y--;
+                    }
+                    if(interpolation_current.z<interpolation_target.z) {
+                        interpolation_current.z++;
+                    }
+                    if(interpolation_current.z>interpolation_target.z) {
+                        interpolation_current.z--;
+                    }
+                    
+                    // if user selected a target CC, send that MIDI value there
+                    if(parseInt(ax.value)>0) {
+                        sendCC(parseInt(ax.value),interpolation_current.x);
+                    }
+                    if(parseInt(ay.value)>0) {
+                        sendCC(parseInt(ay.value),interpolation_current.y);
+                    }
+                    if(parseInt(az.value)>0) {
+                        sendCC(parseInt(az.value),interpolation_current.z);
+                    }
+                },50);
+
+                /**
+                 * wait for the user to make a choice
+                 */
                 const device = await navigator.bluetooth.requestDevice({
                     acceptAllDevices: true,
                     optionalServices: ['de5bf728-d711-4e47-af26-65e3012a5dc7', '6e40fff0-b5a3-f393-e0a9-e50e24dcca9e'] // Add the relevant service UUIDs here
                 });
 
+                /**
+                 * Wait for Bluetooth connection to go online
+                 */
                 const server = await device.gatt.connect();
                 const services = await server.getPrimaryServices();
 
-                // Display the services and characteristics
+                /**
+                 * Display the services and characteristics of the selected BT device
+                 */
                 const capabilitiesDisplay = document.getElementById('capabilitiesDisplay');
+                capabilitiesDisplay.innerHTML="";
 
+                /**
+                 * Go through all found services and attach an event listener to them (which will pick up the Data once it arrives)
+                 */
                 for (const service of services) {
                     capabilitiesDisplay.innerHTML += `<h3>Service: ${service.uuid}</h3>`;
 
@@ -273,14 +365,17 @@
                         // Check if the characteristic supports notifications or indications
                         const properties = characteristic.properties;
                         if(properties.write&&writeTarget==null) {
+                            // yes, it does. This is our writeTarget
                             writeTarget=characteristic;
-                            console.log('Connected to writable characteristic');
                         }
                         if (properties.notify || properties.indicate) {
                             // Set up event listener for incoming data for each characteristic
                             characteristic.addEventListener('characteristicvaluechanged', (event) => {
+                                // turn the raw data we picked up into a data view ...
                                 const view=new DataView(event.target.value.buffer);
+                                // ... and read all the Uint 8 values from that into an array ...
                                 const value=(getAllUint8Values(view));
+                                // we'll display a clock and the last set of data we picked up
                                 const dataDisplay = document.getElementById('dataDisplay');
                                 var now=new Date();
                                 var milli = now.getMilliseconds(),
@@ -288,29 +383,29 @@
                                 min = now.getMinutes(),
                                 hou = now.getHours();
                                 dataDisplay.innerHTML = "<p><b>"+hou+":"+min+":"+sec+":"+milli+`</b> Received Data from ${characteristic.uuid}: `+value.join(",")+`</p>`;
+                                /**
+                                 * the second byte classifies the type of data we received. 
+                                 * we're only interested in type 3 (position data). 
+                                 * you might add clauses for heartbeat rate, blood pressure, temperature, o2 level and camera click if needed
+                                 */
                                 if(value[1]==3) {
+                                    // the following byte shift code was stolen from Aaron Christophel's code (see https://www.youtube.com/@atc1441 )
                                     let rawY = int12((((value[2] << 4) | (value[3] & 0xf)) & 0xfff));
                                     let rawZ = int12((((value[4] << 4) | (value[5] & 0xf)) & 0xfff));
                                     let rawX = int12((((value[6] << 4) | (value[7] & 0xf)) & 0xfff));
                                     const Ax = convertRawToG(rawX);
                                     const Ay = convertRawToG(rawY);
                                     const Az = convertRawToG(rawZ);
+                                    // most MIDI CC values are between 0 and 127, so we'll need to divide 127 by PI
                                     var ratio=127/Math.PI;
+                                    // now multiply the rotation angle by that ratio to get a proper MIDI value
                                     rotateX = parseInt((Math.atan2(Ax, Math.sqrt(Ay * Ay + Az * Az))+Math.PI/2)*ratio);
                                     rotateY = parseInt((Math.atan2(Ay, Math.sqrt(Ax * Ax + Az * Az))+Math.PI/2)*ratio);
                                     rotateZ = parseInt((Math.atan2(Az, Math.sqrt(Ax * Ax + Ay * Ay))+Math.PI/2)*ratio);
                                     document.getElementById("data_x").innerHTML="X: "+rotateX;//value[2];
                                     document.getElementById("data_y").innerHTML="Y: "+rotateY;//value[3];
                                     document.getElementById("data_z").innerHTML="Z: "+rotateZ;//value[4];
-                                    if(parseInt(document.getElementById("assign_x").value)>0) {
-                                        sendCC(parseInt(document.getElementById("assign_x").value),rotateX);
-                                    }
-                                    if(parseInt(document.getElementById("assign_y").value)>0) {
-                                        sendCC(parseInt(document.getElementById("assign_y").value),rotateY);
-                                    }
-                                    if(parseInt(document.getElementById("assign_z").value)>0) {
-                                        sendCC(parseInt(document.getElementById("assign_z").value),rotateZ);
-                                    }
+                                    interpolation_target={x:rotateX,y:rotateY,z:rotateZ};
                                 }
                             });
 
@@ -328,12 +423,13 @@
             }
         });
     
+        /**
+         * User can click the "RAW DATA" button on or off; send the data assigned to them when that happens
+         */
         document.querySelectorAll('button.switch').forEach((element) => {
             element.addEventListener('click', async () => {
                 if (writeTarget) {
-                    
                     const data = htb(element.dataset.v);
-                    
                     var arrayOut = new Uint8Array(16);
                     for (let i = 0; i < data.length; i++) {
                         arrayOut[i] = data[i] & 0xff;
@@ -352,6 +448,9 @@
             });
         });
 
+        /**
+         * Initialise MIDI once the page is loaded
+         */
         navigator.requestMIDIAccess({sysex:true}).then(onMIDISuccess, onMIDIFailure);
 
     </script>
