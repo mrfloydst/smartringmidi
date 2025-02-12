@@ -73,10 +73,22 @@
             clear:both;
             margin-bottom: 3px;
         }
+        a {
+            color:#55f;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
     <article>
+        <h1>MIDI Ring Demo</h1>
+        <p>This will turn a <a href="https://www.aliexpress.us/item/3256806445134241.html" target="_blank">Colmi R02</a> smart ring into a MIDI controller. Look at this pages' source code for explanations. Press "connect" to select your ring, then enable RAW data mode by pressing that button, then select MIDI CC the ring should control.</p>
+        <p>Some of the code here (namely, the bit-shifting stuff that enables to turn the accelerometer data into angular values) is directly lifted from <a href="https://github.com/atc1441/ATC_RF03_Ring" target="_blank">@atc1441</a>'s work. Please subscribe to his <a href="https://www.youtube.com/@atc1441" target="_blank">YouTube channel</a>. On his <a href="https://github.com/atc1441/ATC_RF03_Ring" target="_blank">github page</a>, you'll also find a firmware that speeds up RAW data transmission intervals considerably, which allows for more precise motion tracking.</p>
+        <p>Homework for you: Turn the ring's "camera button" into a "clap" trigger. The camera gesture detection can be turned on by sending "0204" and turned off by sending "0206" to the ring.</p>
         <section class="data_info">
             <button id="connectButton">Connect</button>
             <button class="switch" data-v="A10404">RAW Data on</button>
@@ -92,7 +104,7 @@
 
             <p>MIDI device</p>
             <p>MIDI channel</p>
-            <p>&nbsp;</p>
+            <p>Interpolation</p>
 
             <select id="midi_output_device" size="6"><option>none</option></select>
 
@@ -114,9 +126,11 @@
                 <option value="14">Channel 15</option>
                 <option value="15">Channel 16</option>
             </select>
-            <p>&nbsp;</p>
-
+            <p><label for="interpolate"><input type="checkbox" id="interpolate" value="1"> interpolate</label>
+                <label for="intervaltime"><input type="number" id="intervaltime" value="40"> Interval (ms)</label>
+            </p>
         </section>
+
         <h1>Rotational data</h1>
         <ul class="positiondata">
             <li id="data_x">X: 0</li>
@@ -184,7 +198,7 @@
         var interpolation_target={x:0,y:0,z:0};     // target value we're trying to reach
         var writeTarget=null;                       // we need to send some commands to the bluetooth ring, this var will hold the service id
         var interpolation_loop=null;                // a loop / interval which will interpolate midi values
-        var ax,ay,az;
+        var ax,ay,az,dxf,dyf,dzf;                   // point to some GUI elements so we don't need to look them up each cycle
 
         /**
          * reads all the Uint8 numbers from the Data View we read from the Ring
@@ -282,55 +296,103 @@
         }
 
         /**
+         * Simple linear interpolation to make your filters go woosh instead of pok pok
+         * a "motion target" is defined each time the ring sends a new value and a loop will approach that new target
+         * from where it currently is one step a time 
+         */
+        function startstopinterpolation() {
+            if(document.getElementById("interpolate").checked) {
+                /**
+                 * This will run each 40 ms per default
+                 */
+                if(document.getElementById("interpolate").checked) {
+                    /**
+                     * Some visual feedback so the user understands interpolation is on/off
+                     */
+                    document.querySelectorAll("#data_x,#data_y,#data_z").forEach(li=>{
+                        li.style.backgroundColor="#ccf";
+                    });
+                    interpolation_loop=setInterval(function() {
+                        /**
+                         * I'm lazy
+                         */
+                        if(interpolation_current.x<interpolation_target.x) {
+                            interpolation_current.x++;
+                        }
+                        if(interpolation_current.x>interpolation_target.x) {
+                            interpolation_current.x--;
+                        }
+                        if(interpolation_current.y<interpolation_target.y) {
+                            interpolation_current.y++;
+                        }
+                        if(interpolation_current.y>interpolation_target.y) {
+                            interpolation_current.y--;
+                        }
+                        if(interpolation_current.z<interpolation_target.z) {
+                            interpolation_current.z++;
+                        }
+                        if(interpolation_current.z>interpolation_target.z) {
+                            interpolation_current.z--;
+                        }
+                        
+                        // if user selected a target CC, send that MIDI value there
+                        if(parseInt(ax.value)>0) {
+                            sendCC(parseInt(ax.value),interpolation_current.x);
+                        }
+                        if(parseInt(ay.value)>0) {
+                            sendCC(parseInt(ay.value),interpolation_current.y);
+                        }
+                        if(parseInt(az.value)>0) {
+                            sendCC(parseInt(az.value),interpolation_current.z);
+                        }
+                        // update status info (so smooth)
+                        dxf.innerHTML="X: "+interpolation_current.x;
+                        dyf.innerHTML="Y: "+interpolation_current.y;
+                        dzf.innerHTML="Z: "+interpolation_current.z;
+                    },parseInt(document.getElementById("intervaltime").value));
+                }
+            }
+            else {
+                /**
+                 * User turned off interpolation
+                 */
+                clearInterval(interpolation_loop);
+                interpolation_loop=null;
+                /**
+                 * remove visual clue
+                 */
+                document.querySelectorAll("#data_x,#data_y,#data_z").forEach(li=>{
+                    li.style.backgroundColor="#eee";
+                });
+            }
+        }
+
+        /**
+         * Make the "interpolation" checkbox clickable
+         */
+        document.getElementById("interpolate").addEventListener("click",function(){
+            startstopinterpolation();
+        });
+
+        /**
+         * Make the CC selectors change color once the user has selected something
+         */
+        document.querySelectorAll(".positiondata input").forEach((t)=>{
+            t.addEventListener("change", el=> {
+                if(parseInt(el.target.value)>0) {
+                    el.target.parentElement.parentElement.style.backgroundColor="#cfc";
+                }
+                else {
+                    el.target.parentElement.parentElement.style.backgroundColor="#eee";
+                }
+            });
+        });
+
+        /**
          * User clicks "connect" Button and selects Ring, then ...
          */
         document.getElementById('connectButton').addEventListener('click', async () => {
             try {
-
-                /**
-                 * Don't waste too much time on the DOM stuff
-                 */
-                ax=document.getElementById("assign_x");
-                ay=document.getElementById("assign_y");
-                az=document.getElementById("assign_z");
-
-                /**
-                 * This will run 20 times a sec
-                 */
-                interpolation_loop=setInterval(function() {
-                    /**
-                     * I'm lazy
-                     */
-                    if(interpolation_current.x<interpolation_target.x) {
-                        interpolation_current.x++;
-                    }
-                    if(interpolation_current.x>interpolation_target.x) {
-                        interpolation_current.x--;
-                    }
-                    if(interpolation_current.y<interpolation_target.y) {
-                        interpolation_current.y++;
-                    }
-                    if(interpolation_current.y>interpolation_target.y) {
-                        interpolation_current.y--;
-                    }
-                    if(interpolation_current.z<interpolation_target.z) {
-                        interpolation_current.z++;
-                    }
-                    if(interpolation_current.z>interpolation_target.z) {
-                        interpolation_current.z--;
-                    }
-                    
-                    // if user selected a target CC, send that MIDI value there
-                    if(parseInt(ax.value)>0) {
-                        sendCC(parseInt(ax.value),interpolation_current.x);
-                    }
-                    if(parseInt(ay.value)>0) {
-                        sendCC(parseInt(ay.value),interpolation_current.y);
-                    }
-                    if(parseInt(az.value)>0) {
-                        sendCC(parseInt(az.value),interpolation_current.z);
-                    }
-                },50);
 
                 /**
                  * wait for the user to make a choice
@@ -402,10 +464,25 @@
                                     rotateX = parseInt((Math.atan2(Ax, Math.sqrt(Ay * Ay + Az * Az))+Math.PI/2)*ratio);
                                     rotateY = parseInt((Math.atan2(Ay, Math.sqrt(Ax * Ax + Az * Az))+Math.PI/2)*ratio);
                                     rotateZ = parseInt((Math.atan2(Az, Math.sqrt(Ax * Ax + Ay * Ay))+Math.PI/2)*ratio);
-                                    document.getElementById("data_x").innerHTML="X: "+rotateX;//value[2];
-                                    document.getElementById("data_y").innerHTML="Y: "+rotateY;//value[3];
-                                    document.getElementById("data_z").innerHTML="Z: "+rotateZ;//value[4];
+                                    if(interpolation_loop==null) {
+                                        dxf.innerHTML="X: "+rotateX;//value[2];
+                                        dyf.innerHTML="Y: "+rotateY;//value[3];
+                                        dzf.innerHTML="Z: "+rotateZ;//value[4];
+                                    }
                                     interpolation_target={x:rotateX,y:rotateY,z:rotateZ};
+                                    // if user didn't turn on interpolation, send data to MIDI device immediately
+                                    if(!document.getElementById("interpolate").checked) {
+                                        // if user selected a target CC, send that MIDI value there
+                                        if(parseInt(ax.value)>0) {
+                                            sendCC(parseInt(ax.value),interpolation_target.x);
+                                        }
+                                        if(parseInt(ay.value)>0) {
+                                            sendCC(parseInt(ay.value),interpolation_target.y);
+                                        }
+                                        if(parseInt(az.value)>0) {
+                                            sendCC(parseInt(az.value),interpolation_target.z);
+                                        }
+                                    }
                                 }
                             });
 
@@ -424,17 +501,24 @@
         });
     
         /**
-         * User can click the "RAW DATA" button on or off; send the data assigned to them when that happens
+         * User can click the "RAW DATA" button on or off
          */
         document.querySelectorAll('button.switch').forEach((element) => {
             element.addEventListener('click', async () => {
                 if (writeTarget) {
+                    /**
+                     * The command to be sent to the ring is found in the HTML data set of that element (see above)
+                     * we need to convert it to an array if Uint8 values
+                     */
                     const data = htb(element.dataset.v);
                     var arrayOut = new Uint8Array(16);
                     for (let i = 0; i < data.length; i++) {
                         arrayOut[i] = data[i] & 0xff;
                         arrayOut[15] = (arrayOut[15] + arrayOut[i]) & 0xff;
                     }
+                    /**
+                     * Now try to send it to the ring
+                     */
                     try {
                         await writeTarget.writeValue(arrayOut);
                         document.getElementById('statusDisplay').innerText = 'Data sent successfully';
@@ -452,6 +536,16 @@
          * Initialise MIDI once the page is loaded
          */
         navigator.requestMIDIAccess({sysex:true}).then(onMIDISuccess, onMIDIFailure);
+
+        /**
+         * Don't waste too much time on the DOM stuff, so let's create "pointers" to some of the screen elements
+         */
+        ax=document.getElementById("assign_x");
+        ay=document.getElementById("assign_y");
+        az=document.getElementById("assign_z");
+        dxf=document.getElementById("data_x");
+        dyf=document.getElementById("data_y");
+        dzf=document.getElementById("data_z");
 
     </script>
 </body>
